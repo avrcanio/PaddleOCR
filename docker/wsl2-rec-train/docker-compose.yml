@@ -1,0 +1,17 @@
+services:
+  paddleocr:
+    build:
+      context: ../..
+      dockerfile: docker/wsl2-rec-train/Dockerfile
+    image: paddleocr-train:cuda11.8
+    gpus: all
+    working_dir: /workspace/PaddleOCR
+    volumes:
+      - ../../:/workspace/PaddleOCR
+      - ./data:/workspace/data
+      - ./output:/workspace/output
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    stdin_open: true
+    tty: true
