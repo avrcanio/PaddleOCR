@@ -1,17 +1,17 @@
+# CPU-only runtime: inference and utilities using pretrained / fine-tuned weights.
+# Put checkpoints under ./models (→ /workspace/models in the container).
+
 services:
   paddleocr:
+    container_name: paddleocr
     build:
       context: ../..
       dockerfile: docker/wsl2-rec-train/Dockerfile
-    image: paddleocr-train:cuda11.8
-    gpus: all
+    image: paddleocr-inference:cpu
     working_dir: /workspace/PaddleOCR
     volumes:
       - ../../:/workspace/PaddleOCR
+      - ./models:/workspace/models
       - ./data:/workspace/data
       - ./output:/workspace/output
-    environment:
-      - NVIDIA_VISIBLE_DEVICES=all
-      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
-    stdin_open: true
-    tty: true
+    command: ["sleep", "infinity"]

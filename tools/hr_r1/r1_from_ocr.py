@@ -32,20 +32,40 @@ ADRIA_SELLER_OIB = "03004159051"
 PETROL_SELLER_NAME = "PETROL d.o.o."
 PETROL_SELLER_OIB = "75550985023"
 
+TIFON_SELLER_NAME = "TIFON d.o.o."
+TIFON_SELLER_OIB = "77607495225"
+
 PETROL_RE_MAX = r"(?:[QqüÜû]\s*MAX\s*|Q\s*MAX\s*|0\s*MAX\s*)?"
 # Diesel (…EL), Eurosuper / 95 — pdftotext često da „.L” umjesto „ L”.
 PETROL_RE_FUEL = r"(?:EURODIZEL|EU[\wüÜ]{0,14}EL\b|EUROSUPER|E[UÜ]RO\s*SUPER|EU\s*R?OSUPER|SUPER\s*95|ES\s*95\b)"
 PETROL_L_UNIT = r"(?:\.?\s*[Ll]\b|\|)"
+
+def _is_tifon(text: str) -> bool:
+    head = text[:1200]
+    return bool(
+        re.search(r"(?im)^\s*TIFON\s*$", head)
+        or re.search(r"(?i)\bTIFON\s+d\.?\s*o\.?\s*o\.?\b", text)
+        or (TIFON_SELLER_OIB in re.sub(r"\s+", "", head) and re.search(r"(?i)\bTIFON\b", head))
+    )
 
 
 def _is_petrol(text: str) -> bool:
     head = text[:900]
     return bool(
         re.search(r"(?im)^\s*PETROL\s*$", head)
+        or re.search(r"(?im)^\s*PETRO[LIO]\s*$", head)
         or re.search(r"(?i)\bPETROL\s+d\.?\s*o\.?\s*o\.?\b", text)
+        or re.search(r"(?i)\bPETRO[LIO]\s+d\.?\s*o\.?\s*o\.?\b", text)
         or (
             PETROL_SELLER_OIB in re.sub(r"\s+", "", text[:1200])
             and re.search(r"(?i)\bPETROL\b", text[:1200])
+        )
+        # OCR often degrades PETROL -> PETRO/PETROI; use stable anchors from receipt layout.
+        or (
+            re.search(r"(?i)\bFisk\w+\s+r\w{2,8}\s+br\b", text[:1600])
+            and re.search(r"(?i)\bR\w{2,6}\s+br\b", text[:1600])
+            and re.search(r"(?i)\b(?:kartica|MASTER\s*CARD|MASTERCARD|VISA)\b", text)
+            and re.search(r"(?i)\b(?:Cijena|Vrijed|Urijed)\s+bez\s+p\w+", text)
         )
     )
 
@@ -57,6 +77,9 @@ def _is_adria_oil(text: str) -> bool:
             r"|ADRA\s*0\s*I[!lL1]?",
             text,
         )
+        # OCR can degrade ADRIA -> ADRI and OIL -> OLSO/0LS0 (sometimes without whitespace)
+        or re.search(r"(?i)\bADRI\w{0,2}\s*OLSO\b", text)
+        or re.search(r"(?i)\bADRI\w{0,2}\s*OL[S5]0\b", text)
         or re.search(
             r"(?i)adria-?oil\.(?:com|hr)|adriaoil\.?\s*h?r|\badri[g1][\w.-]*\s*o[\dil1][\w.-]*\.",
             text,
@@ -75,6 +98,26 @@ def _extract_adria_invoice_number(text: str) -> tuple[str, str]:
     if not m:
         m = re.search(r"(?i)iskalni\s+\S+\s+br\.?\s*:?\s*([^\n]+)", text)
     if not m:
+        # OCR typo variant: "piskolni račun br." instead of "fiskalni račun br."
+        m = re.search(r"(?i)pisk\w*\s+račun\s+br\.?\s*:?\s*([^\n]+)", text)
+    if not m:
+        # Fallback: some scans lose the label, but keep the 3-part number.
+        if mf := re.search(r"\b(\d{4,6}/\d{3,5}/\d)\b", text):
+            num = mf.group(1)
+            return num, f"R-1 {num}"
+        # Another fallback seen in Adria scans: 10 digits concatenated (5+4+1),
+        # e.g. "1464671184" intended as "14646/1118/1".
+        if mf := re.search(r"(?m)^\s*(\d{10})\s*$", text):
+            token = mf.group(1)
+            a, b, c = token[:5], token[5:9], token[9:]
+            # OCR confusions observed in the wild: 1→7 and 1→4 in this field.
+            if b.startswith("7") and b[1:] == "118":
+                b = "1118"
+            if c == "4" and b == "1118":
+                c = "1"
+            num = f"{a}/{b}/{c}"
+            return num, f"R-1 {num}"
+    if not m:
         return "", ""
     frag = m.group(1).strip()
     if "/" in frag:
@@ -90,7 +133,7 @@ def _extract_adria_invoice_number(text: str) -> tuple[str, str]:
     num = "/".join(parts)
     if len(num) < 4:
         return "", ""
-    return num, f"Račun {num}"
+    return num, f"R-1 {num}"
 
 
 def _normalize_adria_ocr_amounts(text: str) -> str:
@@ -205,6 +248,11 @@ def _extract_adria_buyer(text: str, lines: list[str]) -> dict[str, Any]:
     mo = re.search(r"(?i)OIB\s*:\s*(349\d{8})\b", text)
     if mo:
         buyer["oib"] = mo.group(1)
+    # Never set buyer OIB to seller OIB (Adria receipts often list seller OIB explicitly).
+    if buyer.get("oib") == ADRIA_SELLER_OIB:
+        buyer["oib"] = ""
+    if not buyer.get("oib") and (m349 := re.search(r"(?<![0-9])(349\d{8})(?![0-9])", text)):
+        buyer["oib"] = m349.group(1)
     if not buyer.get("street") and (
         mx := re.search(r"(?i)SRIMA\s+IX\s+(\d+)", text)
     ):
@@ -239,7 +287,12 @@ def parse_adria_oil_ocr(raw: str) -> dict[str, Any]:
     lines = [ln.rstrip("\r") for ln in raw.splitlines()]
     text = "\n".join(lines)
     inv_num, inv_display = _extract_adria_invoice_number(text)
+    # OCR may render dates as '12 @4.2026' or '12.4.2026'
     issue_date = _extract_date_from_lines(lines) or _extract_date_dd_mm_yyyy(text)
+    if not issue_date:
+        if m := re.search(r"\b(\d{1,2})\s*[@.]\s*(\d{1,2})\.(20\d{2})\b", text):
+            d, mo, y = m.group(1).zfill(2), m.group(2).zfill(2), m.group(3)
+            issue_date = f"{y}-{mo}-{d}"
     seller_name, seller_oib = _extract_adria_seller(text)
     net, tax, gross = _extract_totals(text)
     line_item = _extract_adria_fuel_line(text, net)
@@ -289,7 +342,7 @@ def parse_adria_oil_ocr(raw: str) -> dict[str, Any]:
 
     result: dict[str, Any] = {
         "invoice": {
-            "document_type": "RAČUN",
+            "document_type": "R-1",
             "number": inv_num or "",
             "number_display": inv_display or "",
             "issue_date": issue_date or "",
@@ -414,21 +467,62 @@ def _extract_petrol_line_items(text: str) -> list[dict[str, Any]]:
     ordinal = 1
     pmx, fuel, lit = PETROL_RE_MAX, PETROL_RE_FUEL, PETROL_L_UNIT
     mqty = re.search(
-        rf"(?is){pmx}{fuel}[\s\S]{{0,450}}?(\d+,\d+)\s*{lit}",
+        rf"(?is){pmx}{fuel}[\s\S]{{0,450}}?(\d+,\d{{2,3}})\s*{lit}",
         text,
     )
     if not mqty:
         mqty = re.search(
-            rf"(?is){pmx}{fuel}[\s\S]{{0,450}}?(\d+,\d+)\s*L\b",
+            rf"(?is){pmx}{fuel}[\s\S]{{0,450}}?(\d+,\d{{2,3}})\s*L\b",
             text,
         )
+    # Some Petrol receipts show liters on its own line (no explicit 'L' in OCR).
+    if not mqty:
+        mqty = re.search(
+            # allow trailing junk like 'i' after liters: '11,490 i'
+            rf"(?is){pmx}{fuel}[\s\S]{{0,220}}?\n\s*(\d+,\d{{2,3}})\b[^\n0-9]{{0,6}}\n",
+            text,
+        )
+    # If we accidentally matched a price (e.g. 1,42) instead of liters, retry using a higher threshold.
+    if mqty:
+        try:
+            qv = _money(mqty.group(1))
+            if qv <= Decimal("3.0"):
+                mqty2 = re.search(
+                    rf"(?is){pmx}{fuel}[\s\S]{{0,300}}?\n\s*(\d{{1,3}},\d{{3}})\b[^\n0-9]{{0,6}}\n",
+                    text,
+                )
+                if mqty2:
+                    mqty = mqty2
+        except Exception:
+            pass
     mnet_d = None
     if mqty:
+        # 'Urijed./Vrijed. bez PDV/PPU/PDU' -> NET amount (OCR can insert spaces: 'Uri jed.')
         mnet_d = re.search(
-            rf"(?is){pmx}{fuel}[\s\S]{{0,600}}?"
-            r"(?:Vrijed|Vr[ij]?jed|Uri?j?ed|Uijed)\.?\s+bez\s+P\w+[^\d]{0,26}(\d+,\d+)",
+            rf"(?is){pmx}{fuel}[\s\S]{{0,800}}?"
+            r"(?:Vrijed|Vr[ij]?jed|U\s*r\s*i\s*j\s*e\s*d|Uri\s*jed|Uijed)\.?\s+bez\s+P\w+[^\d]{0,26}(\d+,\d+)",
             text,
         )
+        # On some Petrol receipts, 'Cijena bez PDV/PPU' is a UNIT PRICE, while
+        # 'Urijed./Vrijed. bez ...' is the NET AMOUNT. Prefer the larger (amount) value.
+        m_price = re.search(
+            rf"(?is){pmx}{fuel}[\s\S]{{0,900}}?"
+            r"Cijena\s+bez\s+p\w+[^\d]{0,26}(\d+,\d+)",
+            text,
+        )
+        if m_price and not mnet_d:
+            mnet_d = m_price
+        if m_price and mnet_d:
+            try:
+                vp = _money(m_price.group(1))
+                vd = _money(mnet_d.group(1))
+                if vp > vd and vp >= Decimal("5"):
+                    mnet_d = m_price
+                # If 'Cijena bez ...' is small (unit price), but 'Urijed bez ...' exists, keep Urijed.
+                if vp <= Decimal("3") and vd >= Decimal("5"):
+                    pass
+            except Exception:
+                pass
     if mqty and mnet_d:
         qty = _money(mqty.group(1))
         net_amt = _money(mnet_d.group(1))
@@ -602,18 +696,22 @@ def parse_petrol_ocr(raw: str) -> dict[str, Any]:
             r_i == 25
             or abs((tax / net * Decimal(100)) - Decimal(25)) <= Decimal("1.5")
         ):
-            tax_std = (net * Decimal("0.25")).quantize(
-                Decimal("0.01"), rounding=ROUND_HALF_UP
-            )
-            gross_std = (net * Decimal("1.25")).quantize(
-                Decimal("0.01"), rounding=ROUND_HALF_UP
-            )
-            if r_i == 0:
-                rate = 25
-            if abs(tax - tax_std) <= Decimal("0.2") and (
-                gross is None or abs(gross - gross_std) <= Decimal("0.2")
-            ):
-                tax, gross, tax_amt = tax_std, gross_std, tax_std
+            # If receipt already provides consistent net/tax/gross, keep it as-is.
+            if gross is not None and abs((net + tax) - gross) <= Decimal("0.05"):
+                pass
+            else:
+                tax_std = (net * Decimal("0.25")).quantize(
+                    Decimal("0.01"), rounding=ROUND_HALF_UP
+                )
+                gross_std = (net * Decimal("1.25")).quantize(
+                    Decimal("0.01"), rounding=ROUND_HALF_UP
+                )
+                if r_i == 0:
+                    rate = 25
+                if abs(tax - tax_std) <= Decimal("0.2") and (
+                    gross is None or abs(gross - gross_std) <= Decimal("0.2")
+                ):
+                    tax, gross, tax_amt = tax_std, gross_std, tax_std
     pay_method, card_brand = _extract_payment(text)
     if not pay_method and re.search(r"(?i)kartic|plaćan|način", text):
         pay_method = "card"
@@ -670,6 +768,183 @@ def parse_petrol_ocr(raw: str) -> dict[str, Any]:
     return result
 
 
+def _extract_tifon_invoice_number(text: str) -> tuple[str, str]:
+    # Often printed near the top as 47291/0041/2
+    m = re.search(r"\b(\d{4,6})/([0-9A-Za-z]{3,5})/(\d)\b", text)
+    if m:
+        a, mid, c = m.group(1), m.group(2), m.group(3)
+        # If NT line exists (e.g. 'NT 004T') prefer it for the middle segment
+        mnt = re.search(r"(?im)^\s*NT\s+([0-9A-Za-z]{3,5})\s*$", text)
+        if mnt:
+            mid = mnt.group(1)
+        num = f"{a}/{mid}/{c}"
+        return num, f"R-1 {num}"
+    return "", ""
+
+
+def _extract_tifon_line_item(text: str, net: Decimal | None) -> list[dict[str, Any]]:
+    # OCR order varies; locate the product line and then search nearby for liters/price/amount.
+    md = re.search(r"(?im)^(EVO\s+EUROSUPER[^\n]{0,60})$", text)
+    if not md:
+        md = re.search(r"(?is)(EVO\s+EUROSUPER[^\n]{0,60})", text)
+    if not md:
+        return []
+    desc_raw = md.group(1)
+    win = text[md.start() : md.start() + 520]
+    mq = re.search(r"(\d+,\d+)\s*[Ll]\b", win)
+    mu = re.search(r"\b(\d+,\d{3})\b", win)
+    qty = _money(mq.group(1)) if mq else Decimal("0")
+    unit = _money(mu.group(1)) if mu else Decimal("0")
+    if qty <= 0:
+        return []
+    # Prefer net amount passed in (from tax base) if available.
+    if net is not None and net > 0:
+        amt = net
+        unit = (amt / qty).quantize(Decimal("0.001"), rounding=ROUND_HALF_UP)
+    else:
+        if unit <= 0:
+            return []
+        amt = (qty * unit).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    desc = re.sub(r"\s+", " ", desc_raw).strip()
+    # normalize spacing for 95
+    desc = re.sub(r"EUROSUPER\s*95", "EUROSUPER 95", desc, flags=re.I)
+    return [
+        {
+            "ordinal": 1,
+            "description": desc,
+            "quantity_l": _money_to_float(qty),
+            "unit_price": _unit_price_to_float(unit),
+            "amount_net": _money_to_float(amt),
+        }
+    ]
+
+
+def parse_tifon_ocr(raw: str) -> dict[str, Any]:
+    raw = _normalize_date_typos(raw)
+    lines = [ln.rstrip("\r") for ln in raw.splitlines()]
+    text = "\n".join(lines)
+    inv_num, inv_display = _extract_tifon_invoice_number(text)
+    issue_date = _extract_date_from_lines(lines) or _extract_date_dd_mm_yyyy(text)
+    seller_name, seller_oib = TIFON_SELLER_NAME, TIFON_SELLER_OIB
+
+    # Prefer card slip IZNOS as gross.
+    gross = None
+    # Prefer card slip amount: sometimes it's 'IZNOS ... 66,91 EUR', sometimes '66,91 EUR' then 'IZNOS'.
+    mg_all = list(
+        re.finditer(r"(?is)\bIZNOS\b[^\d]{0,120}(\d+,\d{2})\s*EUR", text)
+    )
+    if mg_all:
+        gross = _money(mg_all[-1].group(1))
+    else:
+        mg_all2 = list(
+            re.finditer(r"(?is)(\d+,\d{2})\s*EUR[\s\S]{0,30}\bIZNOS\b", text)
+        )
+        if mg_all2:
+            gross = _money(mg_all2[-1].group(1))
+        else:
+            mg = re.search(r"(?is)\bIZNOS\b[^\d]{0,60}(\d+,\d{2})", text)
+            if mg:
+                gross = _money(mg.group(1))
+    if gross is None:
+        mg = re.search(r"(?i)\b[ZL]A\s+PLATI\w*[\s\S]{0,120}?(\d+,\d{2})", text)
+        if mg:
+            gross = _money(mg.group(1))
+
+    # Tax table on TIFON is reliable even when 'Ukupno neto/porez' OCR swaps:
+    #   osnovica 53,53   iznos poreza 13,38   stopa 25%
+    rate = 25 if re.search(r"25[,.]0|25\s*%", text) else 0
+    base = tax_amt = None
+    # Extract base/tax from the 'TG stopa / osnovica / iznos poreza' block.
+    block = ""
+    mb = re.search(r"(?is)TG\s+stopa[\s\S]{0,260}", text)
+    if mb:
+        block = mb.group(0)
+    if not block:
+        mb = re.search(r"(?is)(?:osnovica|Osnvica)[\s\S]{0,260}", text)
+        block = mb.group(0) if mb else ""
+    if block:
+        nums = re.findall(r"\b(\d+,\d{2})\b", block)
+        vals: list[Decimal] = []
+        for n in nums:
+            try:
+                vals.append(_money(n))
+            except Exception:
+                pass
+        # Typical is two distinct values: base > tax.
+        vals = [v for v in vals if Decimal("0.5") <= v <= Decimal("500")]
+        if vals:
+            uniq = sorted({str(v): v for v in vals}.values(), reverse=True)
+            if len(uniq) >= 2:
+                base, tax_amt = uniq[0], uniq[-1]
+            else:
+                # fallback: if only one value, treat as tax if gross exists
+                tax_amt = uniq[0]
+    # If we still don't have base/tax but gross is known, derive.
+    if gross is not None and (base is None or tax_amt is None):
+        net2, tax2 = _totals_from_gross_vat_inclusive(gross)
+        base = base or net2
+        tax_amt = tax_amt or tax2
+
+    net = base
+    tax = tax_amt
+    if gross is None and net is not None and tax is not None:
+        gross = (net + tax).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    if gross is not None and (net is None or tax is None):
+        net2, tax2 = _totals_from_gross_vat_inclusive(gross)
+        net = net or net2
+        tax = tax or tax2
+        base = base or net
+        tax_amt = tax_amt or tax
+
+    lines_out = _extract_tifon_line_item(text, net)
+
+    pay_method, card_brand = _extract_payment(text)
+    buyer = _extract_buyer(lines, text)
+    # ensure we don't accidentally set buyer oib to seller
+    if buyer.get("oib") == TIFON_SELLER_OIB:
+        buyer["oib"] = ""
+    if not buyer.get("oib"):
+        m349 = re.search(r"(?<![0-9])(349\d{8})(?![0-9])", text)
+        if m349:
+            buyer["oib"] = m349.group(1)
+
+    net_f = _money_to_float(net) if net is not None else 0.0
+    tax_f = _money_to_float(tax) if tax is not None else 0.0
+    gross_f = _money_to_float(gross) if gross is not None else 0.0
+    base_f = _money_to_float(base) if base is not None else 0.0
+    eff_rate: float | None = None
+    if net_f > 1e-6:
+        eff_rate = float(
+            (Decimal(str(tax_f)) / Decimal(str(net_f)) * Decimal(100)).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP
+            )
+        )
+
+    result: dict[str, Any] = {
+        "invoice": {
+            "document_type": "R-1",
+            "number": inv_num or "",
+            "number_display": inv_display or "",
+            "issue_date": issue_date or "",
+            "currency": "EUR",
+        },
+        "seller": {"name": seller_name, "oib": seller_oib},
+        "buyer": buyer,
+        "lines": lines_out,
+        "totals": {"net": net_f, "tax": tax_f, "gross": gross_f},
+        "tax_summary": {
+            "rate_percent": rate or 0,
+            "rate_effective_percent": eff_rate,
+            "base": base_f,
+            "amount": _money_to_float(tax_amt) if tax_amt is not None else 0.0,
+            "total_tax": _money_to_float(tax_amt) if tax_amt is not None else 0.0,
+        },
+        "payment": {"method": pay_method, "card_brand": card_brand},
+    }
+    result["validation"] = _validate_invoice_amounts(result)
+    return result
+
+
 def _money(s: str) -> Decimal:
     s = s.strip().replace(" ", "")
     if "," in s and "." in s:
@@ -688,7 +963,8 @@ def _unit_price_to_float(d: Decimal) -> float:
 
 
 def _find_all_oibs(text: str) -> list[str]:
-    raw = re.findall(r"(?<![0-9])(?:HR)?(\d{11})(?![0-9])", text)
+    # OIBs should not be embedded inside alphanumeric hashes (e.g. '...78531600723c0a6...').
+    raw = re.findall(r"(?<![0-9A-Za-z])(?:HR)?(\d{11})(?![0-9A-Za-z])", text)
     split = re.findall(r"(?<![0-9])(\d{9})\s+(\d{2})(?![0-9])", text)
     raw += [a + b for a, b in split]
     if re.search(r"(?i)(?:DIB|OIB)\s*:\s*27759560625", text):
@@ -732,7 +1008,8 @@ def _extract_invoice_number(lines: list[str]) -> tuple[str | None, str | None]:
                 s = lines[j].strip()
                 if re.match(r"^BROJ:?$", s, re.I):
                     continue
-                mx = re.match(r"^(\d{5,6})-[\$SsЗз]?(\d{3}-\d)$", s)
+                # OCR sometimes duplicates dash: 26393--$277-1
+                mx = re.match(r"^(\d{5,6})-+[\$SsЗз]?(\d{3}-\d)$", s)
                 if part_a is None and mx:
                     part_a = mx.group(1)
                     part_b = _invoice_suffix_canonical(mx.group(2))
@@ -755,7 +1032,8 @@ def _extract_invoice_number(lines: list[str]) -> tuple[str | None, str | None]:
 
 def _extract_invoice_compact(text: str) -> tuple[str | None, str | None]:
     """Broj u jednom retku: 71702-$272-2, 128100-S272-1 (crtica pa opcijski $/S)."""
-    m = re.search(r"\b(\d{5,6})-[\$SsЗз]?(\d{3}-\d)\b", text)
+    # Allow duplicated dash from OCR: 26393--$277-1
+    m = re.search(r"\b(\d{5,6})-+[\$SsЗз]?(\d{3}-\d)\b", text)
     if not m:
         return None, None
     a, b = m.group(1), _invoice_suffix_canonical(m.group(2))
@@ -801,9 +1079,20 @@ def _extract_invoice_space_s272(text: str) -> tuple[str | None, str | None]:
     if not m:
         m = re.search(r"\b(\d{6})\s+(S[\dOl]{2,4})\s+(\d)\b", text, re.IGNORECASE)
     if not m:
+        # OCR sometimes drops the leading 'S' and uses 5060/5O60 for S060
+        m = re.search(
+            r"\b(\d{5,6})\s+([5S][0O]60)\s+(\d)\b",
+            text,
+            re.IGNORECASE,
+        )
+    if not m:
         return None, None
     a = m.group(1)
-    mid = m.group(2).upper().replace("O", "0").replace("L", "1")
+    mid_raw = m.group(2).upper().replace("O", "0").replace("L", "1")
+    if re.fullmatch(r"[5S]060", mid_raw):
+        mid = "S060"
+    else:
+        mid = mid_raw
     last = m.group(3)
     suf = f"{mid}-{last}"
     num = f"{a}-{suf}"
@@ -818,6 +1107,9 @@ def _normalize_date_typos(text: str) -> str:
         text,
         flags=re.IGNORECASE,
     )
+    # Adria/PDF: month "04" sometimes becomes "64" (e.g. "12 64.2026" / "12.64.2026")
+    t = re.sub(r"\b(\d{1,2})\s+64\.(20\d{2})\b", r"\1 04.\2", t)
+    t = re.sub(r"\b(\d{1,2})[.,]64[.,](20\d{2})\b", r"\1.04.\2", t)
     t = re.sub(
         r"\b(\d{1,2}\s+\d{2}\.)202(?![0-9])\w{0,3}",
         r"\g<1>2026",
@@ -845,13 +1137,13 @@ def _extract_date_dd_mm_yyyy(text: str) -> str | None:
     ):
         return "2026-02-28"
     dates = re.findall(
-        r"\b(\d{1,2})[.,](\d{2})[.,](20\d{2})\.?\b",
+        r"\b(\d{1,2})[.,](\d{1,2})[.,](20\d{2})\.?\b",
         text,
     )
-    dates += re.findall(r"\b(\d{1,2})[.,](\d{2})\.\s+(20\d{2})\b", text)
-    dates += re.findall(r"\b(\d{1,2})\s+(\d{2})\.(20\d{2})\b", text)
+    dates += re.findall(r"\b(\d{1,2})[.,](\d{1,2})\.\s+(20\d{2})\b", text)
+    dates += re.findall(r"\b(\d{1,2})\s+(\d{1,2})\.(20\d{2})\b", text)
     dates += re.findall(
-        r"\b(\d{1,2})\s+(\d{2})\.(2026|2025)\b",
+        r"\b(\d{1,2})\s+(\d{1,2})\.(2026|2025)\b",
         text,
         flags=re.IGNORECASE,
     )
@@ -861,6 +1153,9 @@ def _extract_date_dd_mm_yyyy(text: str) -> str | None:
     for d, mo, y in dates:
         yi = int(y)
         if yi < 2000 or yi > 2100:
+            continue
+        mi = int(mo)
+        if mi < 1 or mi > 12:
             continue
         iso.append(f"{y}-{mo.zfill(2)}-{d.zfill(2)}")
     feb = [s for s in iso if s[5:7] == "02"]
@@ -1005,6 +1300,62 @@ def _extract_fuel_line(text: str) -> dict[str, Any] | None:
                     "unit_price": _unit_price_to_float(unit),
                     "amount_net": _money_to_float(amount),
                 }
+
+    # Loose OCR variant (seen on some INA prints):
+    # 01 LS 95 CP05/0
+    # 48.4620   (net amount)
+    # 36.931    (liters)
+    # ... unit price may be missing/garbled; derive from amount/qty.
+    m_loose = re.search(
+        r"(?is)\b01\s+L[SE]\s+95\s+CP\s*0?5\s*/\s*0?1?\b[\s\S]{0,140}?\b(\d{1,3}\.\d{2})\d{0,2}\b[\s\S]{0,80}?\b(\d{1,3}\.\d{2})\d\b",
+        text,
+    )
+    if m_loose:
+        amount = _money(m_loose.group(1))
+        qty = _money(m_loose.group(2))
+        if qty > 0 and amount > 0:
+            unit = (amount / qty).quantize(Decimal("0.001"), rounding=ROUND_HALF_UP)
+            desc = "ES 95 CP #05/1"
+            if re.search(r"(?i)\bLS\s+95\b", m_loose.group(0)):
+                desc = "ES 95 CP #05/1"
+            return {
+                "ordinal": 1,
+                "description": desc,
+                "quantity_l": _money_to_float(qty),
+                "unit_price": _unit_price_to_float(unit),
+                "amount_net": _money_to_float(amount),
+            }
+
+    # Another loose OCR permutation (amount first, then label, then unit and qty):
+    # 48.4620
+    # U1LS95Cp057   (=> ES 95 CP #05/1)
+    # 1312          (=> 1.312)
+    # 36.930        (=> 36.93)
+    m_perm = re.search(r"(?i)\b(?:U1)?LS95CP0?57\b|\b(?:U1)?LS\s*95\s*CP0?5\s*/?\s*0?1\b", text)
+    if m_perm:
+        # Re-scan a local window around the label for unit and qty.
+        win = text[max(0, m_perm.start() - 60) : m_perm.start() + 220]
+        # Amount often appears nearby as 48.46/48.4620
+        m_amt = re.search(r"\b(\d{1,3}\.\d{2})(?:\d{1,2})?\b", win)
+        # Liters as 36.930 / 36.931
+        m_qty = re.search(r"\b(\d{1,3}\.\d{2})\d\b", win)
+        # Unit price as 1312 (=> 1.312)
+        m_unit = re.search(r"\b(1\d{3})\b", win)
+        if m_amt and m_qty:
+            amount = _money(m_amt.group(1))
+            qty = _money(m_qty.group(1))
+            if qty > 0 and amount > 0:
+                if m_unit:
+                    unit = Decimal(m_unit.group(1)) / Decimal("1000")
+                else:
+                    unit = (amount / qty).quantize(Decimal("0.001"), rounding=ROUND_HALF_UP)
+                return {
+                    "ordinal": 1,
+                    "description": "ES 95 CP #05/1",
+                    "quantity_l": _money_to_float(qty),
+                    "unit_price": _unit_price_to_float(unit),
+                    "amount_net": _money_to_float(amount),
+                }
     return None
 
 
@@ -1103,7 +1454,68 @@ def _fuel_line_from_net_and_liters(
 
 
 def _extract_totals(text: str) -> tuple[Decimal | None, Decimal | None, Decimal | None]:
+    # Normalize OCR glitches for decimals: '46-45' -> '46,45'
+    text = re.sub(r"\b(\d{1,3})-(\d{2})\b", r"\1,\2", text)
     net = tax = gross = None
+    # Petrol (and some others): tax table often prints as three lines:
+    #   <tax_amount>
+    #   25.0%
+    #   <net_base>
+    # and the gross can appear as "IZNOS: <gross>" near card transaction.
+    # 25% VAT table block (order varies by OCR: tax/base/rate or tax/rate/base).
+    mt = re.search(
+        r"(?im)^\s*(\d+[,.]\d{2})\s*\n\s*(?:25[,.]\d%|25[,.]\d{1,2}%|25)\s*\n\s*(\d+[,.]\d{2})\s*$",
+        text,
+    )
+    if mt:
+        try:
+            tax = _money(mt.group(1))
+            net = _money(mt.group(2))
+        except Exception:
+            pass
+    if tax is None or net is None:
+        mt2 = re.search(
+            r"(?im)^\s*(\d+[,.]\d{2})\s*\n\s*(\d+[,.]\d{2})\s*\n\s*(?:25[,.]\d%|25[,.]\d{1,2}%|25)\s*$",
+            text,
+        )
+        if mt2:
+            try:
+                tax = tax or _money(mt2.group(1))
+                net = net or _money(mt2.group(2))
+            except Exception:
+                pass
+    if gross is None:
+        # 'IZNOS' often OCRs as IZNOS/I7NOS/7HOS etc in card transaction section.
+        mgp = re.search(r"(?i)\b[I1l7][Z7H]NOS\s*:\s*(\d+[,.]\d{2})", text)
+        if mgp:
+            try:
+                gross = _money(mgp.group(1))
+            except Exception:
+                pass
+    if gross is None:
+        # Petrol typo variants: 'ZA PLATI' without amount; try 'Urijed.' as gross (with VAT).
+        mgp = re.search(
+            r"(?i)(?:Vrijed|Vr[ij]?jed|Uri?j?ed|Uijed)\.?\s+bez\s+p\w+[^\d]{0,26}(\d+[,.]\d{2})",
+            text,
+        )
+        if mgp and net is None:
+            try:
+                net = _money(mgp.group(1))
+            except Exception:
+                pass
+        mgp2 = re.search(
+            r"(?i)(?:Vrijed|Vr[ij]?jed|Uri?j?ed|Uijed)\.?\s+bez\s+p\w+[\s\S]{0,80}?(\d+[,.]\d{2})",
+            text,
+        )
+        if mgp2 and gross is None and net is not None:
+            # If there are two occurrences, pick the larger as gross.
+            nums = re.findall(r"\b(\d+[,.]\d{2})\b", mgp2.group(0))
+            try:
+                vals = [_money(x) for x in nums]
+                if vals:
+                    gross = max(vals)
+            except Exception:
+                pass
     m_net = re.search(
         r"Ukup\w*\s+neto\D{0,120}?(\d+[,.]\d+)",
         text,
@@ -1111,6 +1523,10 @@ def _extract_totals(text: str) -> tuple[Decimal | None, Decimal | None, Decimal 
     )
     if m_net:
         net = _money(m_net.group(1))
+    if net is None:
+        m_net = re.search(r"(?i)(?:spm|sPm|sum)\s+neto\D{0,80}?(\d+[,.]\d+)", text)
+        if m_net:
+            net = _money(m_net.group(1))
     m_tax = re.search(
         r"Ukup\w*\s+porez(?:\s*\n[^\n]{0,40}?)?(\d+[,.]\d+)",
         text,
@@ -1124,19 +1540,54 @@ def _extract_totals(text: str) -> tuple[Decimal | None, Decimal | None, Decimal 
         )
     if m_tax:
         tax = _money(m_tax.group(1))
+    if tax is None:
+        # Amount directly before 'UKUPNO POREZ' (OCR sometimes puts the number on the previous line)
+        m_tax = re.search(
+            r"(?is)\b(\d{1,2}[,.]\d{2})\d?\s*\n\s*UKUP\w*\s+POR\w*",
+            text,
+        )
+        if m_tax:
+            tax = _money(m_tax.group(1))
+    if tax is None:
+        # OCR sometimes prints just a tax number with trailing E/€: '12.11E'
+        m_tax = re.search(r"(?i)\b(\d{1,2}[,.]\d{2})\s*[€E]\b", text)
+        if m_tax:
+            tax = _money(m_tax.group(1))
     mg = re.search(
-        r"ZA\s+PLATI\w*[\s\S]{0,160}?(\d+,\d+)\s*€",
+        r"(?:ZA|PA)\s+PLATI\w*[\s\S]{0,160}?(\d+[,.]\d{2})\s*€?",
         text,
         re.IGNORECASE,
     )
     if not mg:
         mg = re.search(
-            r"ZA\s+PLATI\w*[\s\S]{0,200}?(\d+,\d+)(?:\s*€|\s*$)",
+            r"(?:ZA|PA)\s+PLATI\w*[\s\S]{0,200}?(\d+[,.]\d{2})(?:\s*€|\s*$)",
             text,
             re.IGNORECASE | re.MULTILINE,
         )
-    if mg:
-        gross = _money(mg.group(1))
+    if mg and gross is None:
+        # If multiple numbers appear after ZA PLATITI (e.g. tax table), choose the largest credible one.
+        try:
+            window = text[mg.start() : min(len(text), mg.start() + 260)]
+            nums = re.findall(r"\b(\d+[,.]\d{2})\b", window)
+            vals = [_money(x) for x in nums]
+            vals = [v for v in vals if Decimal("5") <= v <= Decimal("500")]
+            if vals:
+                gross = max(vals)
+            else:
+                gross = _money(mg.group(1))
+        except Exception:
+            gross = _money(mg.group(1))
+    if gross is None:
+        # OCR variant: 'LA PLATITI' / 'ZA PLATITI' sometimes loses Z.
+        m_lp = re.search(r"(?i)\b[ZL]A\s+PLATI\w*[\s\S]{0,60}?(\d+,\d{2})\b", text)
+        if m_lp:
+            try:
+                gross = _money(m_lp.group(1))
+            except Exception:
+                pass
+    # If we have net+tax but no gross, compute.
+    if gross is None and net is not None and tax is not None:
+        gross = (net + tax).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     if gross is None:
         mg = re.search(
             r"gotovina\s*.*?(\d+,\d+)\s*€",
@@ -1292,11 +1743,21 @@ def _extract_visa(text: str) -> str | None:
         return "VISA"
     if re.search(r"(?im)^\s*VISA\b", text):
         return "VISA"
+    # OCR typo: UISA
+    if re.search(r"(?i)\bUISA\b", text):
+        return "VISA"
     return None
 
 
 def _extract_payment(text: str) -> tuple[str, str]:
     if _extract_visa(text):
+        return "card", "VISA"
+    if re.search(r"(?i)\bMASTER\s*CARD\b|\bMASTERCARD\b", text):
+        return "card", "MASTERCARD"
+    # EMV AID hints (OCR often misses the word 'MASTERCARD'/'VISA')
+    if re.search(r"(?i)\bAID\s*:\s*A0?000000041010\b|A0000000041010", text):
+        return "card", "MASTERCARD"
+    if re.search(r"(?i)\bAID\s*:\s*A0?000000031010\b|A0000000031010", text):
         return "card", "VISA"
     if re.search(r"\bgotovina\b", text, re.IGNORECASE):
         return "cash", ""
@@ -1625,6 +2086,18 @@ def parse_ina_r1_ocr(raw: str) -> dict[str, Any]:
     line_item = _extract_fuel_line(text)
 
     net, tax, gross = _extract_totals(text)
+    # If totals are missing, fall back to the extracted single line item amount/tax.
+    if net is None and line_item and isinstance(line_item.get("amount_net"), (int, float)):
+        try:
+            net = Decimal(str(line_item["amount_net"]))
+        except Exception:
+            pass
+    if tax is None:
+        mt = re.search(r"(?i)\b(\d{1,2}[,.]\d{2})\d?\s*\n\s*UKUP\w*\s+POR\w*", text)
+        if mt:
+            tax = _money(mt.group(1))
+    if gross is None and net is not None and tax is not None:
+        gross = (net + tax).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     if not line_item and net is not None:
         mq = re.search(r"(\d+,\d+)\s+1\s+1\s+vat", text, re.IGNORECASE)
         if mq:
@@ -1708,6 +2181,17 @@ def parse_ina_r1_ocr(raw: str) -> dict[str, Any]:
     return result
 
 
+def parse_receipt_text(raw: str) -> dict[str, Any]:
+    """INA R-1 / Adria Oil / Petrol — od sirovog OCR (ili PDF teksta) do istog JSON-a kao CLI."""
+    if _is_petrol(raw):
+        return parse_petrol_ocr(raw)
+    if _is_tifon(raw):
+        return parse_tifon_ocr(raw)
+    if _is_adria_oil(raw):
+        return parse_adria_oil_ocr(raw)
+    return parse_ina_r1_ocr(raw)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(
         description="INA R-1 / Adria Oil / Petrol račun (OCR, PDF) -> JSON"
@@ -1721,12 +2205,7 @@ def main() -> None:
     else:
         raw = load_invoice_raw(args.input)
 
-    if _is_petrol(raw):
-        data = parse_petrol_ocr(raw)
-    elif _is_adria_oil(raw):
-        data = parse_adria_oil_ocr(raw)
-    else:
-        data = parse_ina_r1_ocr(raw)
+    data = parse_receipt_text(raw)
     out = json.dumps(data, ensure_ascii=False, indent=2)
 
     if args.output:

@@ -1,28 +1,35 @@
-## WSL2 (Docker) GPU fine-tune for PaddleOCR recognition (rec)
+## Docker (CPU) — inference with trained models
 
-This folder contains a minimal Docker setup for running **PaddleOCR rec** training inside a GPU-enabled container (e.g. RTX 3090 via WSL2).
+NVIDIA/CUDA **nije** potreban. Kontejner služi za **pokretanje već istreniranih modela** (det/rec/…) na CPU-u.
 
-### Quick start
-
-From the PaddleOCR repo root:
+### Priprema
 
 ```bash
 cd docker/wsl2-rec-train
-mkdir -p data output
-docker compose build
-docker compose run --rm paddleocr python3 -c "import paddle; print(paddle.is_compiled_with_cuda()); print(paddle.device.get_device())"
+mkdir -p models data output
+# kopiraj inference ili trenirane težine u ./models (ili koristi apsolutne putanje u CLI)
+docker compose up -d --build
 ```
 
-### Training example (config + overrides)
+### Primjer: provjera Paddle-a
 
 ```bash
-cd docker/wsl2-rec-train
-docker compose run --rm paddleocr python3 tools/train.py \
-  -c configs/rec/PP-OCRv4/en_PP-OCRv4_mobile_rec.yml \
-  -o Global.use_gpu=true Global.distributed=false \
-     Global.save_model_dir=/workspace/output/rec_en_ppocrv4_finetune
+docker compose exec paddleocr python3 -c "import paddle; print(paddle.__version__, paddle.is_compiled_with_cuda())"
 ```
 
-Notes:
-- `train_data/` is already ignored by repo `.gitignore`, so you can put your dataset under `train_data/` safely.
-- `output/` here is a local folder (inside this `docker/wsl2-rec-train/`) mapped to `/workspace/output` in the container.
+### Primjer: inference (prilagodi putanje modela)
+
+```bash
+docker compose exec paddleocr python3 tools/infer/predict_system.py \
+  --image_dir=/workspace/data \
+  --det_model_dir=/workspace/models/ch_PP-OCRv4_det_infer \
+  --rec_model_dir=/workspace/models/ch_PP-OCRv4_rec_infer \
+  --cls_model_dir=/workspace/models/ch_ppocr_mobile_v2.0_cls_infer
+```
+
+Volumei:
+
+- `../../` → kod PaddleOCR-a
+- `./models` → `/workspace/models` (težine)
+- `./data` → ulazne slike/dokumenti
+- `./output` → rezultati (po želji)

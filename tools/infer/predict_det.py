@@ -38,9 +38,18 @@ class TextDetector(object):
         if os.path.exists(f"{args.det_model_dir}/inference.yml"):
             model_config = utility.load_config(f"{args.det_model_dir}/inference.yml")
             model_name = model_config.get("Global", {}).get("model_name", "")
+            # Allow common PP-OCR detector variants shipped as inference models.
+            # Some deployments run older (v3/v4) models with the same inference code.
             if model_name and model_name not in [
+                # PP-OCRv5
                 "PP-OCRv5_mobile_det",
                 "PP-OCRv5_server_det",
+                # PP-OCRv4
+                "PP-OCRv4_mobile_det",
+                "PP-OCRv4_server_det",
+                # PP-OCRv3 (kept for compatibility)
+                "PP-OCRv3_mobile_det",
+                "PP-OCRv3_server_det",
             ]:
                 raise ValueError(
                     f"{model_name} is not supported. Please check if the model is supported by the PaddleOCR wheel."

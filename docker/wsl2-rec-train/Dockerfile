@@ -1,4 +1,4 @@
-FROM nvidia/cuda:11.8.0-cudnn8-devel-ubuntu20.04
+FROM ubuntu:22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=Europe/Zagreb
@@ -12,20 +12,27 @@ RUN apt-get update && apt-get install -y \
     wget \
     ca-certificates \
     tzdata \
-    libgl1-mesa-glx \
+    libgl1 \
     libglib2.0-0 \
     poppler-utils \
     libgomp1 \
+    ocrmypdf \
+    tesseract-ocr \
+    tesseract-ocr-hrv \
+    ghostscript \
+    qpdf \
+    jbig2dec \
+    pngquant \
     && rm -rf /var/lib/apt/lists/*
 
-RUN python3 -m pip install --upgrade pip
+RUN python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel
 
-RUN pip3 install -i https://pypi.tuna.tsinghua.edu.cn/simple paddlepaddle-gpu==2.5.1
+RUN pip3 install --no-cache-dir paddlepaddle==2.6.2
 
 COPY requirements.txt /tmp/paddleocr-requirements.txt
-RUN pip3 install -i https://pypi.tuna.tsinghua.edu.cn/simple -r /tmp/paddleocr-requirements.txt \
+RUN pip3 install --no-cache-dir -r /tmp/paddleocr-requirements.txt \
     && rm -f /tmp/paddleocr-requirements.txt
 
 WORKDIR /workspace/PaddleOCR
 
-CMD ["bash"]
+CMD ["sleep", "infinity"]
