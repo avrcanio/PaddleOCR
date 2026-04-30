@@ -1,0 +1,13 @@
+PyMuPDF>=1.24.0
+Pillow>=10.0.0
+numpy>=1.26.0
+opencv-python-headless>=4.9.0.80
+PyYAML>=6.0.1
+# Model tarballs we download are under `.../paddle3.0.0/...`, so pin Paddle to 3.0.x
+paddlepaddle==3.0.0
+shapely>=2.0.0
+pyclipper>=1.3.0.post6
+scikit-image>=0.23.0
+albumentations>=1.4.0
+lmdb>=1.5.0
+

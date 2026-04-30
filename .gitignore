@@ -38,3 +38,18 @@ test_tipc/web/node_modules/
 
 .venv/
 .worktrees/
+
+# Cursor / local runtime
+.cursor/
+.runtime/
+
+# Local env files (use *.example for commits)
+**/.env
+
+# Next.js build artifacts / deps (for embedded apps)
+**/node_modules/
+**/.next/
+
+# Local docker data/model volumes
+docker/wsl2-rec-train/data/
+docker/wsl2-rec-train/models/

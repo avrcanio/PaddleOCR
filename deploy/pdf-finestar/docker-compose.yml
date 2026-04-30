@@ -1,0 +1,38 @@
+services:
+  pdf-app:
+    build:
+      context: ../../applications/next-paddleocr-web
+      dockerfile: Dockerfile
+    container_name: pdf-app
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      HOSTNAME: 0.0.0.0
+      PADDLEOCR_REPO_ROOT: /repo
+      PADDLEOCR_MODELS_DIR: /models
+      FLAGS_use_mkldnn: "0"
+      FLAGS_enable_pir_in_executor: "0"
+      # Python side:
+      # - this container must have python + PaddleOCR deps if you want OCR to work
+      #   (right now Next.js shell-exec uses python3 from the container)
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=proxy"
+      - "traefik.http.routers.pdf.rule=Host(`${PDF_HOSTNAME}`)"
+      - "traefik.http.routers.pdf.entrypoints=websecure"
+      - "traefik.http.routers.pdf.tls=true"
+      - "traefik.http.routers.pdf.tls.certresolver=cloudflare"
+      - "traefik.http.services.pdf.loadbalancer.server.port=3000"
+      # Existing Traefik already redirects web->websecure.
+    networks:
+      - proxy
+    volumes:
+      - /opt/stacks/PaddleOCR:/repo:ro
+      - /opt/stacks/PaddleOCR/.runtime/ocr-models:/models
+
+networks:
+  proxy:
+    external: true
+    name: proxy
+
